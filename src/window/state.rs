@@ -4,7 +4,7 @@ use crate::core::{mouse, theme, window};
 use crate::graphics::Viewport;
 use crate::program::{self, Program};
 
-use winit::event::{Touch, WindowEvent};
+use winit::event::WindowEvent;
 use winit::window::Window;
 
 use std::fmt::{Debug, Formatter};
@@ -49,19 +49,18 @@ where
     pub fn new(
         program: &program::Instance<P>,
         window_id: window::Id,
-        window: &Window,
+        window: &dyn Window,
         system_theme: theme::Mode,
     ) -> Self {
         let title = program.title(window_id);
         let scale_factor = program.scale_factor(window_id);
         let theme = program.theme(window_id);
-        let theme_mode =
-            theme.as_ref().map(theme::Base::mode).unwrap_or_default();
+        let theme_mode = theme.as_ref().map(theme::Base::mode).unwrap_or_default();
         let default_theme = <P::Theme as theme::Base>::default(system_theme);
         let style = program.style(theme.as_ref().unwrap_or(&default_theme));
 
         let viewport = {
-            let physical_size = window.inner_size();
+            let physical_size = window.surface_size();
 
             Viewport::with_physical_size(
                 Size::new(physical_size.width, physical_size.height),
@@ -106,10 +105,7 @@ where
     pub fn cursor(&self) -> mouse::Cursor {
         self.cursor_position
             .map(|cursor_position| {
-                conversion::cursor_position(
-                    cursor_position,
-                    self.viewport.scale_factor(),
-                )
+                conversion::cursor_position(cursor_position, self.viewport.scale_factor())
             })
             .map(mouse::Cursor::Available)
             .unwrap_or(mouse::Cursor::Unavailable)
@@ -138,11 +134,11 @@ where
     pub fn update(
         &mut self,
         program: &program::Instance<P>,
-        window: &Window,
+        window: &dyn Window,
         event: &WindowEvent,
     ) {
         match event {
-            WindowEvent::Resized(new_size) => {
+            WindowEvent::SurfaceResized(new_size) => {
                 let size = Size::new(new_size.width, new_size.height);
 
                 self.viewport = Viewport::with_physical_size(
@@ -163,22 +159,18 @@ where
                 );
                 self.surface_version += 1;
             }
-            WindowEvent::CursorMoved { position, .. }
-            | WindowEvent::Touch(Touch {
-                location: position, ..
-            }) => {
+            WindowEvent::PointerMoved { position, .. } => {
                 self.cursor_position = Some(*position);
             }
-            WindowEvent::CursorLeft { .. } => {
+            WindowEvent::PointerLeft { .. } => {
                 self.cursor_position = None;
             }
             WindowEvent::ModifiersChanged(new_modifiers) => {
                 self.modifiers = new_modifiers.state();
             }
             WindowEvent::ThemeChanged(theme) => {
-                self.default_theme = <P::Theme as theme::Base>::default(
-                    conversion::theme_mode(*theme),
-                );
+                self.default_theme =
+                    <P::Theme as theme::Base>::default(conversion::theme_mode(*theme));
 
                 if self.theme.is_none() {
                     self.style = program.style(&self.default_theme);
@@ -193,7 +185,7 @@ where
         &mut self,
         program: &program::Instance<P>,
         window_id: window::Id,
-        window: &Window,
+        window: &dyn Window,
     ) {
         // Update window title
         let new_title = program.title(window_id);
@@ -233,8 +225,7 @@ where
                 // Assume the old mode matches the system one
                 // We will be notified otherwise
                 if new_mode == theme::Mode::None {
-                    self.default_theme =
-                        <P::Theme as theme::Base>::default(self.theme_mode);
+                    self.default_theme = <P::Theme as theme::Base>::default(self.theme_mode);
 
                     if self.theme.is_none() {
                         self.style = program.style(&self.default_theme);

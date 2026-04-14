@@ -21,8 +21,7 @@ rustc-hash = "2.0"
 thiserror = "2"
 tracing = "0.1"
 window_clipboard = { version = "0.5", default-features = false }
-winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
-
+winit = { version = "=0.31.0-beta.2", default-features = false}
 sysinfo = { version = "0.33", default-features = false, optional = true}
 
 
