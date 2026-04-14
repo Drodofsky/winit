@@ -1018,7 +1018,7 @@ async fn run_instance<P>(
                         .state
                         .update(&program, window.raw.as_ref(), &window_event);
 
-                    if let Some(event) = conversion::window_event(
+                    for event in conversion::window_event(
                         window_event,
                         window.state.scale_factor(),
                         window.state.modifiers(),

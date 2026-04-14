@@ -159,68 +159,198 @@ pub fn window_attributes(
     attributes
 }
 
-/// Converts a winit window event into an iced event.
+/// A sentinel `touch::Finger` ID used to represent a stylus/tablet-tool pointer.
+///
+/// Real touch finger IDs come from the OS and should never reach `u64::MAX`, so
+/// this value is safe to use as a reserved marker.
+pub const STYLUS_FINGER_ID: touch::Finger = touch::Finger(u64::MAX);
+
+/// Converts a winit window event into zero or more iced events.
+///
+/// Returns a `Vec` because a single winit event can sometimes produce multiple
+/// iced events (e.g. a stylus move emits both a [`mouse::Event::CursorMoved`]
+/// *and* a [`touch::Event::FingerMoved`] so applications can subscribe to
+/// whichever abstraction they prefer).
 pub fn window_event(
     event: winit::event::WindowEvent,
     scale_factor: f32,
     modifiers: winit::keyboard::ModifiersState,
-) -> Option<Event> {
+) -> Vec<Event> {
     use winit::event::Ime;
+    use winit::event::PointerKind;
+    use winit::event::PointerSource;
+    use winit::event::TabletToolButton;
     use winit::event::WindowEvent;
 
     match event {
         WindowEvent::SurfaceResized(new_size) => {
             let logical_size = new_size.to_logical(f64::from(scale_factor));
-
-            Some(Event::Window(window::Event::Resized(Size {
+            vec![Event::Window(window::Event::Resized(Size {
                 width: logical_size.width,
                 height: logical_size.height,
-            })))
+            }))]
         }
-        WindowEvent::CloseRequested => Some(Event::Window(window::Event::CloseRequested)),
-        WindowEvent::PointerMoved { position, .. } => {
-            let position = position.to_logical::<f64>(f64::from(scale_factor));
+        WindowEvent::CloseRequested => vec![Event::Window(window::Event::CloseRequested)],
 
-            Some(Event::Mouse(mouse::Event::CursorMoved {
-                position: Point::new(position.x as f32, position.y as f32),
-            }))
+        // --- Pointer move ---
+        WindowEvent::PointerMoved {
+            position, source, ..
+        } => {
+            let logical = position.to_logical::<f64>(f64::from(scale_factor));
+            let pos = Point::new(logical.x as f32, logical.y as f32);
+
+            match source {
+                PointerSource::Mouse => {
+                    vec![Event::Mouse(mouse::Event::CursorMoved { position: pos })]
+                }
+                PointerSource::Touch { finger_id, .. } => {
+                    vec![Event::Touch(touch::Event::FingerMoved {
+                        id: touch::Finger(finger_id.into_raw() as u64),
+                        position: pos,
+                    })]
+                }
+                PointerSource::TabletTool { .. } => {
+                    // Emit cursor move (for UI hover state) AND a touch finger
+                    // move so drawing apps can subscribe to touch events.
+                    vec![
+                        Event::Mouse(mouse::Event::CursorMoved { position: pos }),
+                        Event::Touch(touch::Event::FingerMoved {
+                            id: STYLUS_FINGER_ID,
+                            position: pos,
+                        }),
+                    ]
+                }
+                PointerSource::Unknown => {
+                    vec![Event::Mouse(mouse::Event::CursorMoved { position: pos })]
+                }
+            }
         }
-        WindowEvent::PointerEntered { .. } => Some(Event::Mouse(mouse::Event::CursorEntered)),
-        WindowEvent::PointerLeft { .. } => Some(Event::Mouse(mouse::Event::CursorLeft)),
-        WindowEvent::PointerButton { button, state, .. } => {
-            let button = match button {
-                winit::event::ButtonSource::Mouse(b) => mouse_button(b),
-                // pen tip or touch = left click
-                winit::event::ButtonSource::Touch { .. } => mouse::Button::Left,
-                winit::event::ButtonSource::TabletTool { .. } => mouse::Button::Left,
-                winit::event::ButtonSource::Unknown(_) => return None,
-            };
-            Some(Event::Mouse(match state {
-                winit::event::ElementState::Pressed => mouse::Event::ButtonPressed(button),
-                winit::event::ElementState::Released => mouse::Event::ButtonReleased(button),
-            }))
+
+        // --- Pointer enter ---
+        WindowEvent::PointerEntered { kind, .. } => match kind {
+            PointerKind::Mouse | PointerKind::Unknown => {
+                vec![Event::Mouse(mouse::Event::CursorEntered)]
+            }
+            PointerKind::Touch(_) => vec![],
+            PointerKind::TabletTool(_) => vec![Event::Mouse(mouse::Event::CursorEntered)],
+        },
+
+        // --- Pointer leave ---
+        WindowEvent::PointerLeft { kind, position, .. } => {
+            let pos = position
+                .map(|p| {
+                    let l = p.to_logical::<f64>(f64::from(scale_factor));
+                    Point::new(l.x as f32, l.y as f32)
+                })
+                .unwrap_or(Point::ORIGIN);
+
+            match kind {
+                PointerKind::Mouse | PointerKind::Unknown => {
+                    vec![Event::Mouse(mouse::Event::CursorLeft)]
+                }
+                PointerKind::Touch(finger_id) => vec![Event::Touch(touch::Event::FingerLost {
+                    id: touch::Finger(finger_id.into_raw() as u64),
+                    position: pos,
+                })],
+                PointerKind::TabletTool(_) => {
+                    vec![
+                        Event::Mouse(mouse::Event::CursorLeft),
+                        Event::Touch(touch::Event::FingerLost {
+                            id: STYLUS_FINGER_ID,
+                            position: pos,
+                        }),
+                    ]
+                }
+            }
         }
+
+        // --- Pointer button ---
+        WindowEvent::PointerButton {
+            button,
+            state,
+            position,
+            ..
+        } => {
+            let logical = position.to_logical::<f64>(f64::from(scale_factor));
+            let pos = Point::new(logical.x as f32, logical.y as f32);
+
+            let pressed = state == winit::event::ElementState::Pressed;
+
+            match button {
+                winit::event::ButtonSource::Mouse(b) => {
+                    let b = mouse_button(b);
+                    vec![Event::Mouse(if pressed {
+                        mouse::Event::ButtonPressed(b)
+                    } else {
+                        mouse::Event::ButtonReleased(b)
+                    })]
+                }
+                winit::event::ButtonSource::Touch { finger_id, .. } => {
+                    let id = touch::Finger(finger_id.into_raw() as u64);
+                    vec![Event::Touch(if pressed {
+                        touch::Event::FingerPressed { id, position: pos }
+                    } else {
+                        touch::Event::FingerLifted { id, position: pos }
+                    })]
+                }
+                winit::event::ButtonSource::TabletTool { button, .. } => {
+                    match button {
+                        TabletToolButton::Contact => {
+                            // Stylus tip: emit left-click AND touch finger event
+                            let mouse_ev = if pressed {
+                                mouse::Event::ButtonPressed(mouse::Button::Left)
+                            } else {
+                                mouse::Event::ButtonReleased(mouse::Button::Left)
+                            };
+                            let touch_ev = if pressed {
+                                touch::Event::FingerPressed {
+                                    id: STYLUS_FINGER_ID,
+                                    position: pos,
+                                }
+                            } else {
+                                touch::Event::FingerLifted {
+                                    id: STYLUS_FINGER_ID,
+                                    position: pos,
+                                }
+                            };
+                            vec![Event::Mouse(mouse_ev), Event::Touch(touch_ev)]
+                        }
+                        TabletToolButton::Barrel => {
+                            // Barrel/side button → right-click
+                            vec![Event::Mouse(if pressed {
+                                mouse::Event::ButtonPressed(mouse::Button::Right)
+                            } else {
+                                mouse::Event::ButtonReleased(mouse::Button::Right)
+                            })]
+                        }
+                        _ => vec![],
+                    }
+                }
+                winit::event::ButtonSource::Unknown(_) => vec![],
+            }
+        }
+
         WindowEvent::MouseWheel { delta, .. } => match delta {
             winit::event::MouseScrollDelta::LineDelta(delta_x, delta_y) => {
-                Some(Event::Mouse(mouse::Event::WheelScrolled {
+                vec![Event::Mouse(mouse::Event::WheelScrolled {
                     delta: mouse::ScrollDelta::Lines {
                         x: delta_x,
                         y: delta_y,
                     },
-                }))
+                })]
             }
             winit::event::MouseScrollDelta::PixelDelta(position) => {
-                Some(Event::Mouse(mouse::Event::WheelScrolled {
+                vec![Event::Mouse(mouse::Event::WheelScrolled {
                     delta: mouse::ScrollDelta::Pixels {
                         x: position.x as f32,
                         y: position.y as f32,
                     },
-                }))
+                })]
             }
         },
         // Ignore keyboard presses/releases during window focus/unfocus
-        WindowEvent::KeyboardInput { is_synthetic, .. } if is_synthetic => None,
-        WindowEvent::KeyboardInput { event, .. } => Some(Event::Keyboard({
+        WindowEvent::KeyboardInput { is_synthetic, .. } if is_synthetic => vec![],
+        WindowEvent::KeyboardInput { event, .. } => vec![Event::Keyboard({
             let key = {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
@@ -289,41 +419,50 @@ pub fn window_event(
                     location,
                 },
             }
-        })),
-        WindowEvent::ModifiersChanged(new_modifiers) => Some(Event::Keyboard(
+        })],
+        WindowEvent::ModifiersChanged(new_modifiers) => vec![Event::Keyboard(
             keyboard::Event::ModifiersChanged(self::modifiers(new_modifiers.state())),
-        )),
-        WindowEvent::Ime(event) => Some(Event::InputMethod(match event {
-            Ime::Enabled => input_method::Event::Opened,
-            Ime::Preedit(content, size) => {
-                input_method::Event::Preedit(content, size.map(|(start, end)| start..end))
-            }
-            Ime::Commit(content) => input_method::Event::Commit(content),
-            Ime::Disabled => input_method::Event::Closed,
-            winit::event::Ime::DeleteSurrounding { .. } => return None,
-        })),
-        WindowEvent::Focused(focused) => Some(Event::Window(if focused {
+        )],
+        WindowEvent::Ime(event) => {
+            let ime_event = match event {
+                Ime::Enabled => input_method::Event::Opened,
+                Ime::Preedit(content, size) => {
+                    input_method::Event::Preedit(content, size.map(|(start, end)| start..end))
+                }
+                Ime::Commit(content) => input_method::Event::Commit(content),
+                Ime::Disabled => input_method::Event::Closed,
+                winit::event::Ime::DeleteSurrounding { .. } => return vec![],
+            };
+            vec![Event::InputMethod(ime_event)]
+        }
+        WindowEvent::Focused(focused) => vec![Event::Window(if focused {
             window::Event::Focused
         } else {
             window::Event::Unfocused
-        })),
-        WindowEvent::DragEntered { paths, position } => Some(Event::Window(
-            window::Event::FileHovered(paths.get(0)?.clone()),
-        )),
-        WindowEvent::DragDropped { paths, position } => Some(Event::Window(
-            window::Event::FileDropped(paths.get(0)?.clone()),
-        )),
-        WindowEvent::DragLeft { position } => Some(Event::Window(window::Event::FilesHoveredLeft)),
-        // removed touch support
+        })],
+        WindowEvent::DragEntered { paths, .. } => {
+            if let Some(path) = paths.into_iter().next() {
+                vec![Event::Window(window::Event::FileHovered(path))]
+            } else {
+                vec![]
+            }
+        }
+        WindowEvent::DragDropped { paths, .. } => {
+            if let Some(path) = paths.into_iter().next() {
+                vec![Event::Window(window::Event::FileDropped(path))]
+            } else {
+                vec![]
+            }
+        }
+        WindowEvent::DragLeft { .. } => vec![Event::Window(window::Event::FilesHoveredLeft)],
         WindowEvent::Moved(position) => {
             let winit::dpi::LogicalPosition { x, y } = position.to_logical(f64::from(scale_factor));
-
-            Some(Event::Window(window::Event::Moved(Point::new(x, y))))
+            vec![Event::Window(window::Event::Moved(Point::new(x, y)))]
         }
         WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-            Some(Event::Window(window::Event::Rescaled(scale_factor as f32)))
+            vec![Event::Window(window::Event::Rescaled(scale_factor as f32))]
         }
-        _ => None,
+        _ => vec![],
     }
 }
 
