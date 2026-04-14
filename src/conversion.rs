@@ -8,7 +8,6 @@ use crate::core::input_method;
 use crate::core::keyboard;
 use crate::core::mouse;
 use crate::core::theme;
-use crate::core::touch;
 use crate::core::window;
 use crate::core::{Event, Point, Size};
 
@@ -159,27 +158,16 @@ pub fn window_attributes(
     attributes
 }
 
-/// A sentinel `touch::Finger` ID used to represent a stylus/tablet-tool pointer.
-///
-/// Real touch finger IDs come from the OS and should never reach `u64::MAX`, so
-/// this value is safe to use as a reserved marker.
-pub const STYLUS_FINGER_ID: touch::Finger = touch::Finger(u64::MAX);
-
 /// Converts a winit window event into zero or more iced events.
 ///
-/// Returns a `Vec` because a single winit event can sometimes produce multiple
-/// iced events (e.g. a stylus move emits both a [`mouse::Event::CursorMoved`]
-/// *and* a [`touch::Event::FingerMoved`] so applications can subscribe to
-/// whichever abstraction they prefer).
+/// Returns a `Vec` because some winit events (e.g. IME) can produce multiple
+/// iced events.
 pub fn window_event(
     event: winit::event::WindowEvent,
     scale_factor: f32,
     modifiers: winit::keyboard::ModifiersState,
 ) -> Vec<Event> {
     use winit::event::Ime;
-    use winit::event::PointerKind;
-    use winit::event::PointerSource;
-    use winit::event::TabletToolButton;
     use winit::event::WindowEvent;
 
     match event {
@@ -192,142 +180,34 @@ pub fn window_event(
         }
         WindowEvent::CloseRequested => vec![Event::Window(window::Event::CloseRequested)],
 
-        // --- Pointer move ---
-        WindowEvent::PointerMoved {
-            position, source, ..
-        } => {
+        // All pointer sources (mouse, touch, stylus) are treated as mouse events.
+        WindowEvent::PointerMoved { position, .. } => {
             let logical = position.to_logical::<f64>(f64::from(scale_factor));
             let pos = Point::new(logical.x as f32, logical.y as f32);
-
-            match source {
-                PointerSource::Mouse => {
-                    vec![Event::Mouse(mouse::Event::CursorMoved { position: pos })]
-                }
-                PointerSource::Touch { finger_id, .. } => {
-                    vec![Event::Touch(touch::Event::FingerMoved {
-                        id: touch::Finger(finger_id.into_raw() as u64),
-                        position: pos,
-                    })]
-                }
-                PointerSource::TabletTool { .. } => {
-                    // Emit cursor move (for UI hover state) AND a touch finger
-                    // move so drawing apps can subscribe to touch events.
-                    vec![
-                        Event::Mouse(mouse::Event::CursorMoved { position: pos }),
-                        Event::Touch(touch::Event::FingerMoved {
-                            id: STYLUS_FINGER_ID,
-                            position: pos,
-                        }),
-                    ]
-                }
-                PointerSource::Unknown => {
-                    vec![Event::Mouse(mouse::Event::CursorMoved { position: pos })]
-                }
-            }
+            vec![Event::Mouse(mouse::Event::CursorMoved { position: pos })]
         }
 
-        // --- Pointer enter ---
-        WindowEvent::PointerEntered { kind, .. } => match kind {
-            PointerKind::Mouse | PointerKind::Unknown => {
-                vec![Event::Mouse(mouse::Event::CursorEntered)]
-            }
-            PointerKind::Touch(_) => vec![],
-            PointerKind::TabletTool(_) => vec![Event::Mouse(mouse::Event::CursorEntered)],
-        },
-
-        // --- Pointer leave ---
-        WindowEvent::PointerLeft { kind, position, .. } => {
-            let pos = position
-                .map(|p| {
-                    let l = p.to_logical::<f64>(f64::from(scale_factor));
-                    Point::new(l.x as f32, l.y as f32)
-                })
-                .unwrap_or(Point::ORIGIN);
-
-            match kind {
-                PointerKind::Mouse | PointerKind::Unknown => {
-                    vec![Event::Mouse(mouse::Event::CursorLeft)]
-                }
-                PointerKind::Touch(finger_id) => vec![Event::Touch(touch::Event::FingerLost {
-                    id: touch::Finger(finger_id.into_raw() as u64),
-                    position: pos,
-                })],
-                PointerKind::TabletTool(_) => {
-                    vec![
-                        Event::Mouse(mouse::Event::CursorLeft),
-                        Event::Touch(touch::Event::FingerLost {
-                            id: STYLUS_FINGER_ID,
-                            position: pos,
-                        }),
-                    ]
-                }
-            }
+        WindowEvent::PointerEntered { .. } => {
+            vec![Event::Mouse(mouse::Event::CursorEntered)]
         }
 
-        // --- Pointer button ---
-        WindowEvent::PointerButton {
-            button,
-            state,
-            position,
-            ..
-        } => {
-            let logical = position.to_logical::<f64>(f64::from(scale_factor));
-            let pos = Point::new(logical.x as f32, logical.y as f32);
+        WindowEvent::PointerLeft { .. } => {
+            vec![Event::Mouse(mouse::Event::CursorLeft)]
+        }
 
+        WindowEvent::PointerButton { button, state, .. } => {
             let pressed = state == winit::event::ElementState::Pressed;
-
-            match button {
-                winit::event::ButtonSource::Mouse(b) => {
-                    let b = mouse_button(b);
-                    vec![Event::Mouse(if pressed {
-                        mouse::Event::ButtonPressed(b)
-                    } else {
-                        mouse::Event::ButtonReleased(b)
-                    })]
-                }
-                winit::event::ButtonSource::Touch { finger_id, .. } => {
-                    let id = touch::Finger(finger_id.into_raw() as u64);
-                    vec![Event::Touch(if pressed {
-                        touch::Event::FingerPressed { id, position: pos }
-                    } else {
-                        touch::Event::FingerLifted { id, position: pos }
-                    })]
-                }
-                winit::event::ButtonSource::TabletTool { button, .. } => {
-                    match button {
-                        TabletToolButton::Contact => {
-                            // Stylus tip: emit left-click AND touch finger event
-                            let mouse_ev = if pressed {
-                                mouse::Event::ButtonPressed(mouse::Button::Left)
-                            } else {
-                                mouse::Event::ButtonReleased(mouse::Button::Left)
-                            };
-                            let touch_ev = if pressed {
-                                touch::Event::FingerPressed {
-                                    id: STYLUS_FINGER_ID,
-                                    position: pos,
-                                }
-                            } else {
-                                touch::Event::FingerLifted {
-                                    id: STYLUS_FINGER_ID,
-                                    position: pos,
-                                }
-                            };
-                            vec![Event::Mouse(mouse_ev), Event::Touch(touch_ev)]
-                        }
-                        TabletToolButton::Barrel => {
-                            // Barrel/side button → right-click
-                            vec![Event::Mouse(if pressed {
-                                mouse::Event::ButtonPressed(mouse::Button::Right)
-                            } else {
-                                mouse::Event::ButtonReleased(mouse::Button::Right)
-                            })]
-                        }
-                        _ => vec![],
-                    }
-                }
-                winit::event::ButtonSource::Unknown(_) => vec![],
-            }
+            // Use the mouse button from the source when available; default to
+            // Left (covers stylus tip contact and unknown sources).
+            let b = button
+                .mouse_button()
+                .map(mouse_button)
+                .unwrap_or(mouse::Button::Left);
+            vec![Event::Mouse(if pressed {
+                mouse::Event::ButtonPressed(b)
+            } else {
+                mouse::Event::ButtonReleased(b)
+            })]
         }
 
         WindowEvent::MouseWheel { delta, .. } => match delta {
